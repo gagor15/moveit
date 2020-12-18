@@ -364,6 +364,7 @@ void ServoCalcs::run(const ros::TimerEvent& timer_event)
   if (!updated_filters_)
     resetLowPassFilters(original_joint_state_);
 }
+
 // Perform the servoing calculations
 bool ServoCalcs::cartesianServoCalcs(geometry_msgs::TwistStamped& cmd,
                                      trajectory_msgs::JointTrajectory& joint_trajectory)
@@ -694,6 +695,7 @@ double ServoCalcs::velocityScalingFactorForSingularity(const Eigen::VectorXd& co
 void ServoCalcs::enforceVelLimits(Eigen::ArrayXd& delta_theta)
 {
   Eigen::ArrayXd velocity = delta_theta / parameters_.publish_period;
+  Eigen::ArrayXd acceleration = (velocity - prev_joint_velocity_) / parameters_.publish_period;
 
   std::size_t joint_delta_index = 0;
   // Track the smallest velocity scaling factor required, across all joints
@@ -704,10 +706,9 @@ void ServoCalcs::enforceVelLimits(Eigen::ArrayXd& delta_theta)
     // Some joints do not have bounds defined
     const auto bounds = joint->getVariableBounds(joint->getName());
 
+    // Check velocity bounds
     if (bounds.velocity_bounded_)
     {
-      velocity(joint_delta_index) = delta_theta(joint_delta_index) / parameters_.publish_period;
-
       bool clip_velocity = false;
       double velocity_limit = 0.0;
       if (velocity(joint_delta_index) < bounds.min_velocity_)
@@ -732,6 +733,43 @@ void ServoCalcs::enforceVelLimits(Eigen::ArrayXd& delta_theta)
           velocity_limit_scaling_factor = scaling_factor;
       }
     }
+
+    // Check acceleration bounds
+    if (bounds.acceleration_bounded_)
+    {
+      bool clip_velocity = false;
+      double velocity_limit = 0.0;
+      if (acceleration(joint_delta_index) < bounds.min_acceleration_)
+      {
+        clip_velocity = true;
+        velocity_limit = prev_joint_velocity_(joint_delta_index) + bounds.min_acceleration_ * parameters_.publish_period;
+        // ROS_WARN_STREAM_NAMED(LOGNAME, "Acceleration MIN: " << acceleration(joint_delta_index));
+        // ROS_WARN_STREAM_NAMED(LOGNAME, "vprev: " << prev_joint_velocity_(joint_delta_index));
+        // ROS_WARN_STREAM_NAMED(LOGNAME, "dv: " << bounds.min_acceleration_ * parameters_.publish_period);
+        // ROS_WARN_STREAM_NAMED(LOGNAME, "vel limit: " << velocity_limit);
+      }
+      else if (acceleration(joint_delta_index) > bounds.max_acceleration_)
+      {
+        clip_velocity = true;
+        velocity_limit = prev_joint_velocity_(joint_delta_index) + bounds.max_acceleration_ * parameters_.publish_period;
+        // ROS_WARN_STREAM_NAMED(LOGNAME, "Acceleration MAX: " << acceleration(joint_delta_index));
+        // ROS_WARN_STREAM_NAMED(LOGNAME, "vprev: " << prev_joint_velocity_(joint_delta_index));
+        // ROS_WARN_STREAM_NAMED(LOGNAME, "dv: " << bounds.max_acceleration_ * parameters_.publish_period);
+        // ROS_WARN_STREAM_NAMED(LOGNAME, "vel limit: " << velocity_limit);
+      }
+
+      // Apply velocity bounds
+      if (clip_velocity)
+      {
+        const double scaling_factor =
+            fabs(velocity_limit * parameters_.publish_period) / fabs(delta_theta(joint_delta_index));
+
+        // Store the scaling factor if it's the smallest yet
+        if (scaling_factor < velocity_limit_scaling_factor)
+          velocity_limit_scaling_factor = scaling_factor;
+      }
+    }
+
     ++joint_delta_index;
   }
 
